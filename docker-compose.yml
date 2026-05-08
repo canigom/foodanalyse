@@ -3,14 +3,14 @@
 # Usage:
 #   1. Copy .env.example → .env.production and fill in secrets.
 #   2. docker compose --env-file .env.production up -d --build
-#   3. Verify: curl http://localhost:3001/api/health
+#   3. Verify: curl http://localhost:3002/api/health
 #
 # Reverse-proxy this on port 80/443 with nginx + certbot for HTTPS.
 # See DEPLOY.md for the full guide.
 #
 # Ports are non-default so this stack can co-exist with `resumely` on the
 # same VM:
-#   - app:      host 3001 → container 3000
+#   - app:      host 3002 → container 3000
 #   - postgres: host 5433 → container 5432
 
 services:
@@ -43,13 +43,13 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "3001:3000"
+      - "3002:3000"
     environment:
       # Inside the compose network the DB is reachable as `db:5432`.
       DATABASE_URL: "postgresql://${POSTGRES_USER:-kochheute}:${POSTGRES_PASSWORD:-CHANGEME}@db:5432/${POSTGRES_DB:-kochheute}?schema=public"
       AUTH_SECRET: ${AUTH_SECRET}
       AUTH_TRUST_HOST: "true"
-      AUTH_URL: ${AUTH_URL:-http://localhost:3001}
+      AUTH_URL: ${AUTH_URL:-http://localhost:3002}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AUTH_GOOGLE_ID: ${AUTH_GOOGLE_ID:-}
       AUTH_GOOGLE_SECRET: ${AUTH_GOOGLE_SECRET:-}
