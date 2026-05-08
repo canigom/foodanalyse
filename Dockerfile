@@ -21,6 +21,11 @@ COPY package.json package-lock.json ./
 COPY prisma ./prisma
 COPY prisma.config.ts ./
 
+# Prisma 6's prisma.config.ts validates DATABASE_URL at load time even for
+# `prisma generate`, so we feed a throwaway URL here. Real value is injected
+# at runtime by docker-compose from .env.production.
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
+
 # `npm ci` is reproducible from the lockfile. The postinstall hook in
 # package.json runs `prisma generate`, which needs the schema we copied above.
 RUN npm ci
