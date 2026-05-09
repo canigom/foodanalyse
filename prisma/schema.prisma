@@ -26,10 +26,49 @@ model User {
   createdAt     DateTime      @default(now())
 
   preferences  Preference?
+  profile      UserProfile?
   savedRecipes SavedRecipe[]
   meals        Meal[]
   accounts     Account[]
   sessions     Session[]
+}
+
+// Per-user nutrition profile + app settings, captured during onboarding and
+// editable from the profile screen. Kept separate from Preference (which is
+// strictly recipe-flavor preferences) so the two concepts don't tangle.
+//
+// All fields optional: onboarding can be skipped, and the iOS client only
+// sends what the user filled in. The "override" flag lets the user pin a
+// custom calorie target that shouldn't be auto-recomputed when their other
+// stats change.
+model UserProfile {
+  id                         String   @id @default(cuid())
+  userId                     String   @unique
+  user                       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Personal stats
+  sex                        String?  // 'm' | 'f' | 'd'
+  age                        Int?
+  heightCm                   Int?
+  weightKg                   Float?
+  targetWeightKg             Float?
+  activityLevel              String?  // 'sedentary' | 'light' | 'moderate' | 'heavy' | 'athlete'
+  goal                       String?  // 'lose' | 'maintain' | 'gain'
+
+  // Computed (or user-overridden) targets
+  dailyCalorieTarget         Int?
+  dailyCalorieTargetOverride Boolean  @default(false)
+  proteinTargetG             Int?
+  carbsTargetG               Int?
+  fatTargetG                 Int?
+
+  // App settings
+  units                      String?  // 'metric' | 'imperial'
+
+  // Onboarding progress so we can short-circuit on subsequent launches.
+  onboardingCompleted        Boolean  @default(false)
+
+  updatedAt                  DateTime @updatedAt
 }
 
 model Preference {
