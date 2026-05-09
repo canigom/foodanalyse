@@ -88,6 +88,48 @@ export function buildUserPrompt(prefs: AnalyzePreferences): string {
   ].join("\n");
 }
 
+// ---- "More recipes" follow-up ----
+//
+// Used by /api/analyze/more. The client already has the original photo +
+// 3 recipes; the user has tapped "Mehr Rezepte vorschlagen" asking for a
+// different set of 3. We re-run the same vision call but inject the
+// already-shown names into the prompt as an exclusion list so Claude
+// generates 3 NEW recipes instead of paraphrasing the originals.
+//
+// Output shape: identical to the analyze JSON but the iOS client only
+// reads the `recipes` array — `ingredients` is included for schema
+// reuse (analyzeFridge returns AnalyzeResult). The client throws
+// the ingredients away and just appends recipes to its existing list.
+export function buildMoreRecipesPrompt(
+  prefs: AnalyzePreferences,
+  existingNames: string[],
+): string {
+  const base = buildUserPrompt(prefs);
+  const cleaned = (existingNames ?? [])
+    .map((n) => String(n).trim())
+    .filter(Boolean);
+
+  // No exclusions → just call the regular prompt; Claude will pick whatever
+  // 3 it wants. Realistically the client should always pass at least the
+  // 3 already-shown names, but defending against a bad/empty request is
+  // cheap and keeps the route from 400ing on a programmer error.
+  if (cleaned.length === 0) return base;
+
+  // Inject the exclusion line BEFORE the JSON schema block so the model
+  // notices it. The original `base` says "Schlage genau 3 Rezepte vor";
+  // we follow with an explicit "ANDERE Rezepte als" directive so the
+  // model doesn't fall back to renaming the same dishes.
+  const exclusion =
+    "WICHTIG: Schlage 3 ANDERE Rezepte vor, die NICHT diese Namen haben " +
+    "oder zu nah an ihnen sind: " +
+    cleaned.map((n) => `"${n}"`).join(", ") +
+    ". Variiere Küche, Zubereitungstyp und Hauptzutat-Schwerpunkt.";
+
+  // Prepend the exclusion line to the prompt so the model sees it before
+  // the JSON shape.
+  return `${exclusion}\n\n${base}`;
+}
+
 // ---- Meal photo analysis ----
 //
 // Used by /api/meals POST. The user snaps a photo of a finished plate of food

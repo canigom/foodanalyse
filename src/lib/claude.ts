@@ -12,6 +12,7 @@ import { z } from "zod";
 import {
   SYSTEM_PROMPT,
   buildUserPrompt,
+  buildMoreRecipesPrompt,
   MEAL_ANALYSIS_SYSTEM_PROMPT,
   MEAL_ANALYSIS_USER_PROMPT,
   type AnalyzePreferences,
@@ -197,6 +198,45 @@ export async function analyzeFridge(args: {
   const text = await callClaudeVision({
     systemPrompt: SYSTEM_PROMPT,
     userPrompt: buildUserPrompt(args.preferences),
+    imageBase64: args.imageBase64,
+    model: args.model,
+  });
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(unwrapJson(text));
+  } catch {
+    throw new ClaudeError("Claude returned non-JSON output", 502);
+  }
+
+  const result = AnalyzeResponseSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new ClaudeError(
+      `Claude output failed validation: ${result.error.message}`,
+      502,
+    );
+  }
+  return result.data;
+}
+
+// "Suggest more recipes" follow-up. Same vision call as analyzeFridge
+// but with an exclusion list embedded in the prompt so Claude generates
+// 3 different recipes than the ones already shown. We still parse the
+// full AnalyzeResult schema (ingredients + recipes) so we can reuse the
+// existing validator; the route handler discards `ingredients` because
+// the client already has them.
+export async function analyzeFridgeMore(args: {
+  imageBase64: string;
+  preferences: AnalyzePreferences;
+  existingRecipeNames: string[];
+  model?: ClaudeModel;
+}): Promise<AnalyzeResult> {
+  const text = await callClaudeVision({
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: buildMoreRecipesPrompt(
+      args.preferences,
+      args.existingRecipeNames,
+    ),
     imageBase64: args.imageBase64,
     model: args.model,
   });
