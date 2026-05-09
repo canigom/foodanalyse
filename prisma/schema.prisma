@@ -29,6 +29,7 @@ model User {
   profile      UserProfile?
   savedRecipes SavedRecipe[]
   meals        Meal[]
+  inventoryItems InventoryItem[]
   accounts     Account[]
   sessions     Session[]
 }
@@ -139,6 +140,43 @@ model Meal {
   createdAt   DateTime @default(now())
 
   @@index([userId, createdAt])
+}
+
+// Fridge / pantry inventory item. The user adds items either by scanning
+// an EAN/UPC (which we resolve via OpenFoodFacts on the iOS side, then
+// POST the resolved name + brand + thumbnail) or by typing in a name
+// manually. expiresAt is optional — items without a date land in a
+// dedicated "ohne Datum" group on the iOS list.
+//
+// notificationIds is a write-through cache: the iOS client schedules
+// local notifications (3-day / 1-day / 0-day before expiry) and stores
+// the platform-assigned identifiers back here so we can cancel them
+// when the user updates or deletes the item. The server treats the
+// array as opaque — never reads or writes the contents itself.
+model InventoryItem {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  // Numeric quantity ("2", "500"). Optional because not every item has a
+  // meaningful number ("Olivenöl" without a measure is fine).
+  quantity        Float?
+  // Stable id — 'stk' | 'g' | 'kg' | 'ml' | 'l'. Loose string so the iOS
+  // client can extend the segmented unit picker without a migration.
+  unit            String?
+  expiresAt       DateTime?
+  addedAt         DateTime  @default(now())
+  // EAN/UPC the iOS app scanned (if any). Stored so we can later cross-
+  // reference an updated OpenFoodFacts payload without forcing a re-scan.
+  barcode         String?
+  brand           String?
+  imageUrl        String?
+  notes           String?
+  // Local notification IDs scheduled by the iOS client. Server-side this
+  // is opaque storage; only the iOS client interprets it.
+  notificationIds String[]  @default([])
+
+  @@index([userId, expiresAt])
 }
 
 // Standard NextAuth tables — used only by the Google OAuth flow.
