@@ -9,12 +9,29 @@
 // is the right tradeoff for vision + structured output.
 
 import { z } from "zod";
-import { SYSTEM_PROMPT, buildUserPrompt, type AnalyzePreferences } from "@/lib/prompts";
+import {
+  SYSTEM_PROMPT,
+  buildUserPrompt,
+  MEAL_ANALYSIS_SYSTEM_PROMPT,
+  MEAL_ANALYSIS_USER_PROMPT,
+  type AnalyzePreferences,
+} from "@/lib/prompts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOKENS = 4096;
+
+// Nutrition fields are estimates, so we accept any non-negative number and
+// coerce floats. fiber is optional because the model sometimes omits it for
+// dishes where it's effectively zero.
+const NutritionFields = {
+  calories: z.number().nonnegative(),
+  protein: z.number().nonnegative(),
+  carbs: z.number().nonnegative(),
+  fat: z.number().nonnegative(),
+  fiber: z.number().nonnegative().optional(),
+};
 
 const RecipeSchema = z.object({
   name: z.string().min(1),
@@ -22,6 +39,7 @@ const RecipeSchema = z.object({
   ingredients: z.array(z.string().min(1)),
   steps: z.array(z.string().min(1)),
   cookingTimeMinutes: z.number().int().nonnegative(),
+  ...NutritionFields,
 });
 
 const AnalyzeResponseSchema = z.object({
@@ -29,8 +47,16 @@ const AnalyzeResponseSchema = z.object({
   recipes: z.array(RecipeSchema),
 });
 
+const MealAnalysisSchema = z.object({
+  dishName: z.string().min(1),
+  portionSize: z.string().min(1).optional(),
+  ingredients: z.array(z.string().min(1)).default([]),
+  ...NutritionFields,
+});
+
 export type Recipe = z.infer<typeof RecipeSchema>;
 export type AnalyzeResult = z.infer<typeof AnalyzeResponseSchema>;
+export type MealAnalysis = z.infer<typeof MealAnalysisSchema>;
 
 export class ClaudeError extends Error {
   status: number;
@@ -80,36 +106,44 @@ function unwrapJson(text: string): string {
   return t;
 }
 
-export async function analyzeFridge(args: {
+// Strip "data:image/...;base64," prefix if present and detect the media type.
+function prepareImage(imageBase64: string): {
+  data: string;
+  mediaType: ReturnType<typeof detectMediaType>;
+} {
+  let raw = imageBase64.trim();
+  const comma = raw.indexOf(",");
+  if (raw.startsWith("data:") && comma > 0) raw = raw.slice(comma + 1);
+  return { data: raw, mediaType: detectMediaType(raw) };
+}
+
+// Hand back the JSON-text block from a Messages response, throwing
+// ClaudeError on upstream failure or missing text.
+async function callClaudeVision(args: {
+  systemPrompt: string;
+  userPrompt: string;
   imageBase64: string;
-  preferences: AnalyzePreferences;
-}): Promise<AnalyzeResult> {
+}): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new ClaudeError("ANTHROPIC_API_KEY is not set", 500);
   }
 
-  // The iOS app may send a data URI ("data:image/jpeg;base64,...") or a
-  // bare base64 payload. Strip the prefix if present.
-  let raw = args.imageBase64.trim();
-  const comma = raw.indexOf(",");
-  if (raw.startsWith("data:") && comma > 0) raw = raw.slice(comma + 1);
-
-  const mediaType = detectMediaType(raw);
+  const { data, mediaType } = prepareImage(args.imageBase64);
 
   const body = {
     model: MODEL,
     max_tokens: MAX_TOKENS,
-    system: SYSTEM_PROMPT,
+    system: args.systemPrompt,
     messages: [
       {
         role: "user",
         content: [
           {
             type: "image",
-            source: { type: "base64", media_type: mediaType, data: raw },
+            source: { type: "base64", media_type: mediaType, data },
           },
-          { type: "text", text: buildUserPrompt(args.preferences) },
+          { type: "text", text: args.userPrompt },
         ],
       },
     ],
@@ -127,26 +161,66 @@ export async function analyzeFridge(args: {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    // Surface Anthropic's status (e.g., 429 rate limit, 400 bad image)
-    // back to the iOS app so it can show the right error.
     throw new ClaudeError(
       `Anthropic API error ${res.status}: ${text.slice(0, 500)}`,
       res.status,
     );
   }
 
-  const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-  const textBlock = data.content?.find((b) => b.type === "text" && typeof b.text === "string");
+  const respJson = (await res.json()) as {
+    content?: Array<{ type: string; text?: string }>;
+  };
+  const textBlock = respJson.content?.find(
+    (b) => b.type === "text" && typeof b.text === "string",
+  );
   if (!textBlock?.text) throw new ClaudeError("Claude returned no text content", 502);
+  return textBlock.text;
+}
+
+export async function analyzeFridge(args: {
+  imageBase64: string;
+  preferences: AnalyzePreferences;
+}): Promise<AnalyzeResult> {
+  const text = await callClaudeVision({
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: buildUserPrompt(args.preferences),
+    imageBase64: args.imageBase64,
+  });
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(unwrapJson(textBlock.text));
+    parsed = JSON.parse(unwrapJson(text));
   } catch {
     throw new ClaudeError("Claude returned non-JSON output", 502);
   }
 
   const result = AnalyzeResponseSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new ClaudeError(
+      `Claude output failed validation: ${result.error.message}`,
+      502,
+    );
+  }
+  return result.data;
+}
+
+export async function analyzeMeal(args: {
+  imageBase64: string;
+}): Promise<MealAnalysis> {
+  const text = await callClaudeVision({
+    systemPrompt: MEAL_ANALYSIS_SYSTEM_PROMPT,
+    userPrompt: MEAL_ANALYSIS_USER_PROMPT,
+    imageBase64: args.imageBase64,
+  });
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(unwrapJson(text));
+  } catch {
+    throw new ClaudeError("Claude returned non-JSON output", 502);
+  }
+
+  const result = MealAnalysisSchema.safeParse(parsed);
   if (!result.success) {
     throw new ClaudeError(
       `Claude output failed validation: ${result.error.message}`,

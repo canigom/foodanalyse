@@ -63,6 +63,10 @@ export function buildUserPrompt(prefs: AnalyzePreferences): string {
     "Berücksichtige diese Präferenzen:",
     ...prefLines,
     "",
+    "Schätze für jedes Rezept die Nährwerte pro Portion (realistisch und " +
+      "konservativ). Gib calories als ganze Zahl in kcal an, protein/carbs/fat/fiber " +
+      "in Gramm (Dezimalzahlen erlaubt). fiber ist optional.",
+    "",
     "Antwortformat (gültiges JSON):",
     "{",
     '  "ingredients": ["string", ...],',
@@ -72,9 +76,40 @@ export function buildUserPrompt(prefs: AnalyzePreferences): string {
     '      "description": "string (1-2 Sätze)",',
     '      "ingredients": ["string", ...],',
     '      "steps": ["string", ...],',
-    '      "cookingTimeMinutes": number',
+    '      "cookingTimeMinutes": number,',
+    '      "calories": number,',
+    '      "protein": number,',
+    '      "carbs": number,',
+    '      "fat": number,',
+    '      "fiber": number',
     "    }",
     "  ]",
     "}",
   ].join("\n");
 }
+
+// ---- Meal photo analysis ----
+//
+// Used by /api/meals POST. The user snaps a photo of a finished plate of food
+// and Claude estimates the dish, portion, and per-portion nutrition.
+
+export const MEAL_ANALYSIS_SYSTEM_PROMPT =
+  "Du analysierst Fotos von fertig zubereiteten Mahlzeiten. " +
+  "Identifiziere das Gericht, schätze die Portionsgröße, und schätze realistische Nährwerte. " +
+  "Antworte ausschließlich mit gültigem JSON, ohne Markdown-Codeblöcke und " +
+  "ohne erklärenden Text davor oder danach.";
+
+export const MEAL_ANALYSIS_USER_PROMPT = [
+  "Analysiere dieses Foto einer Mahlzeit. Gib zurück:",
+  "{",
+  '  "dishName": "string (auf Deutsch, kurz)",',
+  '  "portionSize": "string (z.B. \'1 Teller\', \'ca. 350g\')",',
+  '  "calories": number (kcal),',
+  '  "protein": number (g),',
+  '  "carbs": number (g),',
+  '  "fat": number (g),',
+  '  "fiber": number (g, optional),',
+  '  "ingredients": ["string", ...] (sichtbare Hauptzutaten)',
+  "}",
+  "Sei realistisch und präzise. Bei Unsicherheit lieber eine Spannweite mitteln.",
+].join("\n");

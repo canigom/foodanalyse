@@ -27,6 +27,7 @@ model User {
 
   preferences  Preference?
   savedRecipes SavedRecipe[]
+  meals        Meal[]
   accounts     Account[]
   sessions     Session[]
 }
@@ -62,9 +63,41 @@ model SavedRecipe {
   ingredients        String[]
   steps              String[]
   cookingTimeMinutes Int
+  // Per-portion nutrition estimates from the Claude analyze step. Optional
+  // because rows saved before the nutrition feature was added don't have them.
+  calories           Int?
+  protein            Float?
+  carbs              Float?
+  fat                Float?
+  fiber              Float?
   // optional thumbnail (data URI / base64-encoded JPEG)
   imageBase64        String?  @db.Text
   createdAt          DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// User-logged meal photos. v1 stores the photo as base64 inline; this is fine
+// for a single-VM deployment but TODO(v2): move to object storage (S3/R2) so
+// rows stay small and queries remain fast as users accumulate history.
+model Meal {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dishName    String
+  calories    Int
+  protein    Float
+  carbs      Float
+  fat        Float
+  fiber      Float?
+  // human-readable, e.g. "1 Teller", "ca. 350g"
+  portionSize String?
+  ingredients String[]
+  // optional user note
+  notes       String?
+  // TODO(v2): move to object storage; inline base64 makes rows huge.
+  imageBase64 String?  @db.Text
+  createdAt   DateTime @default(now())
 
   @@index([userId, createdAt])
 }

@@ -16,6 +16,13 @@ const RecipeBodySchema = z.object({
   ingredients: z.array(z.string().min(1).max(LIMITS.ingredientItem)).min(1).max(50),
   steps: z.array(z.string().min(1).max(LIMITS.stepItem)).min(1).max(30),
   cookingTimeMinutes: z.number().int().nonnegative().max(24 * 60),
+  // Per-portion nutrition. All optional — older clients won't send them.
+  // Calories capped at a sane max to keep input validation strict.
+  calories: z.number().int().nonnegative().max(10_000).optional(),
+  protein: z.number().nonnegative().max(1_000).optional(),
+  carbs: z.number().nonnegative().max(1_000).optional(),
+  fat: z.number().nonnegative().max(1_000).optional(),
+  fiber: z.number().nonnegative().max(1_000).optional(),
   imageBase64: z.string().max(LIMITS.imageBase64).optional(),
 });
 
@@ -56,6 +63,11 @@ export async function POST(req: Request) {
       ingredients: parsed.data.ingredients,
       steps: parsed.data.steps,
       cookingTimeMinutes: parsed.data.cookingTimeMinutes,
+      calories: parsed.data.calories ?? null,
+      protein: parsed.data.protein ?? null,
+      carbs: parsed.data.carbs ?? null,
+      fat: parsed.data.fat ?? null,
+      fiber: parsed.data.fiber ?? null,
       imageBase64: parsed.data.imageBase64 ?? null,
     },
   });
