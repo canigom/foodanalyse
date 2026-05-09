@@ -13,10 +13,11 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/auth-bearer";
-import { analyzeMeal, ClaudeError } from "@/lib/claude";
+import { analyzeMeal, ClaudeError, CLAUDE_MODELS } from "@/lib/claude";
 import { classifyImage } from "@/lib/classify";
 import { consume } from "@/lib/rate-limit";
 import { LIMITS } from "@/lib/limits";
+import { isInTrial, FREE_TIER_LIMITS } from "@/lib/trial";
 
 export const runtime = "nodejs";
 // Vision calls take 10-25s — bump default function timeout. Self-hosted
@@ -120,6 +121,39 @@ export async function POST(req: Request) {
     );
   }
 
+  // Tier check — trial users get Sonnet + only the hourly ceiling. Free
+  // users get Haiku + a 3/day daily cap that surfaces as a 402 on the
+  // iOS side to gate the upgrade prompt.
+  const userRow = await db.user.findUnique({
+    where: { id: auth.userId },
+    select: { createdAt: true },
+  });
+  if (!userRow) {
+    return Response.json({ error: "User no longer exists" }, { status: 401 });
+  }
+  const inTrial = isInTrial(userRow);
+
+  if (!inTrial) {
+    const day = consume("free-meal", auth.userId);
+    if (!day.ok) {
+      return Response.json(
+        {
+          error: "trial_expired_upgrade",
+          retryAfterSec: day.retryAfterSec,
+          limits: FREE_TIER_LIMITS,
+        },
+        {
+          status: 402,
+          headers: {
+            "Retry-After": String(day.retryAfterSec),
+            "X-RateLimit-Limit": String(day.limit),
+            "X-RateLimit-Remaining": "0",
+          },
+        },
+      );
+    }
+  }
+
   // Same bucket name as recipe analysis would double-count; use a separate
   // key so the user has independent budgets for fridge analysis vs. meal
   // logging. 30/hour user-scoped is the cap (re-using the analyze-user limit).
@@ -164,7 +198,11 @@ export async function POST(req: Request) {
   }
 
   try {
-    const analysis = await analyzeMeal({ imageBase64: parsed.data.imageBase64 });
+    const analysis = await analyzeMeal({
+      imageBase64: parsed.data.imageBase64,
+      // Trial → Sonnet (full quality). Free → Haiku (cheaper).
+      model: inTrial ? CLAUDE_MODELS.sonnet : CLAUDE_MODELS.haiku,
+    });
 
     // Apply portion multiplier server-side so nothing downstream has to do it.
     // Round calories to int (kcal); keep macros to 1 decimal — matches what

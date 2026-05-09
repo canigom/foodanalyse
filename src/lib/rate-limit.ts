@@ -11,14 +11,24 @@
 
 type Bucket = { hits: number[] };
 
-const WINDOW_MS = 60 * 60 * 1000; // 1 hour rolling window
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
-const LIMITS_PER_HOUR = {
-  "analyze-anon": 5,
-  "analyze-user": 30,
+// Each bucket has a window + a ceiling. Hourly buckets exist for API
+// abuse protection (apply to all tiers including paying customers).
+// Daily buckets are tier gates that kick in once the 24h trial expires
+// — hitting them returns a 402 to the iOS client which renders the
+// paywall.
+const BUCKETS = {
+  "analyze-anon": { windowMs: HOUR_MS, limit: 5 },
+  "analyze-user": { windowMs: HOUR_MS, limit: 30 },
+  // Free-tier daily caps. Numbers match FREE_TIER_LIMITS in lib/trial.ts —
+  // keep them in sync if either side changes.
+  "free-fridge": { windowMs: DAY_MS, limit: 1 },
+  "free-meal": { windowMs: DAY_MS, limit: 3 },
 } as const;
 
-export type RateKind = keyof typeof LIMITS_PER_HOUR;
+export type RateKind = keyof typeof BUCKETS;
 
 export type RateResult = {
   ok: boolean;
@@ -30,10 +40,11 @@ export type RateResult = {
 const buckets = new Map<string, Bucket>();
 
 export function consume(kind: RateKind, principal: string): RateResult {
-  const limit = LIMITS_PER_HOUR[kind];
+  const cfg = BUCKETS[kind];
+  const { windowMs, limit } = cfg;
   const key = `${kind}:${principal}`;
   const now = Date.now();
-  const cutoff = now - WINDOW_MS;
+  const cutoff = now - windowMs;
 
   const bucket = buckets.get(key) ?? { hits: [] };
   // Drop expired hits so the array stays small.
@@ -43,7 +54,7 @@ export function consume(kind: RateKind, principal: string): RateResult {
     const oldest = bucket.hits[0];
     return {
       ok: false,
-      retryAfterSec: Math.max(1, Math.ceil((oldest + WINDOW_MS - now) / 1000)),
+      retryAfterSec: Math.max(1, Math.ceil((oldest + windowMs - now) / 1000)),
       limit,
       remaining: 0,
     };
@@ -56,6 +67,25 @@ export function consume(kind: RateKind, principal: string): RateResult {
     retryAfterSec: 0,
     limit,
     remaining: limit - bucket.hits.length,
+  };
+}
+
+// Read-only check — does NOT increment the bucket. Used by /api/billing/status
+// so the iOS client can render "X of Y remaining today" without burning a hit.
+export function peek(kind: RateKind, principal: string): RateResult {
+  const cfg = BUCKETS[kind];
+  const { windowMs, limit } = cfg;
+  const key = `${kind}:${principal}`;
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const bucket = buckets.get(key) ?? { hits: [] };
+  const live = bucket.hits.filter((t) => t > cutoff);
+  const remaining = Math.max(0, limit - live.length);
+  return {
+    ok: live.length < limit,
+    retryAfterSec: live.length >= limit ? Math.max(1, Math.ceil((live[0] + windowMs - now) / 1000)) : 0,
+    limit,
+    remaining,
   };
 }
 

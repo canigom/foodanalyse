@@ -16,10 +16,11 @@
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/auth-bearer";
-import { analyzeFridge, ClaudeError } from "@/lib/claude";
+import { analyzeFridge, ClaudeError, CLAUDE_MODELS } from "@/lib/claude";
 import { classifyImage } from "@/lib/classify";
 import { consume } from "@/lib/rate-limit";
 import { LIMITS } from "@/lib/limits";
+import { isInTrial, FREE_TIER_LIMITS } from "@/lib/trial";
 
 export const runtime = "nodejs";
 // Vision calls into Claude can take 10-25s; bump the function timeout to
@@ -86,7 +87,44 @@ export async function POST(req: Request) {
     );
   }
 
-  // Rate-limit BEFORE calling Claude — these calls cost real money.
+  // Tier check — fetch the user's createdAt to decide trial vs free.
+  // Trial users get Sonnet + the 30/h ceiling only; free users get Haiku
+  // + a 1/day cap that gates the upgrade prompt.
+  const userRow = await db.user.findUnique({
+    where: { id: auth.userId },
+    select: { createdAt: true },
+  });
+  if (!userRow) {
+    // Token valid but row gone — bounce as 401 so iOS resets auth.
+    return Response.json({ error: "User no longer exists" }, { status: 401 });
+  }
+  const inTrial = isInTrial(userRow);
+
+  // Daily free-tier gate. Hits BEFORE the global hourly bucket so a free
+  // user already at their daily limit never burns a Claude call.
+  if (!inTrial) {
+    const day = consume("free-fridge", auth.userId);
+    if (!day.ok) {
+      return Response.json(
+        {
+          error: "trial_expired_upgrade",
+          retryAfterSec: day.retryAfterSec,
+          limits: FREE_TIER_LIMITS,
+        },
+        {
+          status: 402,
+          headers: {
+            "Retry-After": String(day.retryAfterSec),
+            "X-RateLimit-Limit": String(day.limit),
+            "X-RateLimit-Remaining": "0",
+          },
+        },
+      );
+    }
+  }
+
+  // Global per-hour ceiling — applies to trial + free + premium alike as
+  // API abuse protection. These calls cost real money.
   const rate = consume("analyze-user", auth.userId);
   if (!rate.ok) {
     return Response.json(
@@ -149,6 +187,9 @@ export async function POST(req: Request) {
     const result = await analyzeFridge({
       imageBase64: parsed.data.imageBase64,
       preferences,
+      // Trial → Sonnet (full quality). Free → Haiku (cheaper, slightly
+      // lower quality output but still good enough for ingredient-to-recipe).
+      model: inTrial ? CLAUDE_MODELS.sonnet : CLAUDE_MODELS.haiku,
     });
     return Response.json(
       { ...result, detectedType: detected ?? "fridge" },

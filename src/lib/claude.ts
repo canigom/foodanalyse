@@ -18,9 +18,20 @@ import {
 } from "@/lib/prompts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = "claude-sonnet-4-6";
+// Default model for analyze calls. Sonnet is the right tradeoff for
+// vision + structured output. The /api/analyze + /api/meals routes pick
+// the model per-request based on the user's tier (Sonnet for trial +
+// premium, Haiku for free) — see ClaudeModel below.
+const SONNET_MODEL = "claude-sonnet-4-6";
+const HAIKU_MODEL = "claude-haiku-4-5-20251001";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOKENS = 4096;
+
+export type ClaudeModel = typeof SONNET_MODEL | typeof HAIKU_MODEL;
+export const CLAUDE_MODELS = {
+  sonnet: SONNET_MODEL,
+  haiku: HAIKU_MODEL,
+} as const;
 
 // Nutrition fields are estimates, so we accept any non-negative number and
 // coerce floats. fiber is optional because the model sometimes omits it for
@@ -123,6 +134,7 @@ async function callClaudeVision(args: {
   systemPrompt: string;
   userPrompt: string;
   imageBase64: string;
+  model?: ClaudeModel;
 }): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -132,7 +144,7 @@ async function callClaudeVision(args: {
   const { data, mediaType } = prepareImage(args.imageBase64);
 
   const body = {
-    model: MODEL,
+    model: args.model ?? SONNET_MODEL,
     max_tokens: MAX_TOKENS,
     system: args.systemPrompt,
     messages: [
@@ -180,11 +192,13 @@ async function callClaudeVision(args: {
 export async function analyzeFridge(args: {
   imageBase64: string;
   preferences: AnalyzePreferences;
+  model?: ClaudeModel;
 }): Promise<AnalyzeResult> {
   const text = await callClaudeVision({
     systemPrompt: SYSTEM_PROMPT,
     userPrompt: buildUserPrompt(args.preferences),
     imageBase64: args.imageBase64,
+    model: args.model,
   });
 
   let parsed: unknown;
@@ -206,11 +220,13 @@ export async function analyzeFridge(args: {
 
 export async function analyzeMeal(args: {
   imageBase64: string;
+  model?: ClaudeModel;
 }): Promise<MealAnalysis> {
   const text = await callClaudeVision({
     systemPrompt: MEAL_ANALYSIS_SYSTEM_PROMPT,
     userPrompt: MEAL_ANALYSIS_USER_PROMPT,
     imageBase64: args.imageBase64,
+    model: args.model,
   });
 
   let parsed: unknown;
