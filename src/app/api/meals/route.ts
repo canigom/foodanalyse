@@ -14,6 +14,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/auth-bearer";
 import { analyzeMeal, ClaudeError } from "@/lib/claude";
+import { classifyImage } from "@/lib/classify";
 import { consume } from "@/lib/rate-limit";
 import { LIMITS } from "@/lib/limits";
 
@@ -141,6 +142,23 @@ export async function POST(req: Request) {
   }
 
   const multiplier = parsed.data.portionMultiplier ?? 1;
+
+  // Cheap pre-flight: if the image clearly looks like a fridge/ingredients
+  // shot, short-circuit so the iOS client can redirect the user to the
+  // recipes section instead of saving a meal we can't sensibly analyze.
+  // classifyImage returns "other" on any failure → happy path falls through.
+  const detected = await classifyImage(parsed.data.imageBase64);
+  if (detected === "fridge") {
+    return Response.json(
+      { wrongSection: true, suggestedType: "fridge" as const },
+      {
+        headers: {
+          "X-RateLimit-Limit": String(rate.limit),
+          "X-RateLimit-Remaining": String(rate.remaining),
+        },
+      },
+    );
+  }
 
   try {
     const analysis = await analyzeMeal({ imageBase64: parsed.data.imageBase64 });

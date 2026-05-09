@@ -14,6 +14,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { optionalUser } from "@/lib/auth-bearer";
 import { analyzeFridge, ClaudeError } from "@/lib/claude";
+import { classifyImage } from "@/lib/classify";
 import { consume, clientIp } from "@/lib/rate-limit";
 import { LIMITS } from "@/lib/limits";
 
@@ -137,17 +138,38 @@ export async function POST(req: Request) {
     };
   }
 
+  // Cheap pre-flight: if the image is clearly a finished plate of food,
+  // short-circuit and tell the client to redirect to the meals section
+  // before we burn a Sonnet call generating recipes from a dish photo.
+  // classifyImage returns "other" on any failure, so the happy path is
+  // never blocked by a flaky classifier.
+  const detected = await classifyImage(parsed.data.imageBase64);
+  if (detected === "meal") {
+    return Response.json(
+      { wrongSection: true, suggestedType: "meal" as const },
+      {
+        headers: {
+          "X-RateLimit-Limit": String(rate.limit),
+          "X-RateLimit-Remaining": String(rate.remaining),
+        },
+      },
+    );
+  }
+
   try {
     const result = await analyzeFridge({
       imageBase64: parsed.data.imageBase64,
       preferences,
     });
-    return Response.json(result, {
-      headers: {
-        "X-RateLimit-Limit": String(rate.limit),
-        "X-RateLimit-Remaining": String(rate.remaining),
+    return Response.json(
+      { ...result, detectedType: detected },
+      {
+        headers: {
+          "X-RateLimit-Limit": String(rate.limit),
+          "X-RateLimit-Remaining": String(rate.remaining),
+        },
       },
-    });
+    );
   } catch (err) {
     if (err instanceof ClaudeError) {
       // 5xx from upstream → 502; 4xx → 400 (client supplied bad image
