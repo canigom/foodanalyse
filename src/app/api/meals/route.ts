@@ -148,9 +148,12 @@ export async function POST(req: Request) {
   // recipes section instead of saving a meal we can't sensibly analyze.
   // classifyImage returns "other" on any failure → happy path falls through.
   const detected = await classifyImage(parsed.data.imageBase64);
-  if (detected === "fridge") {
+  // 'fridge' → suggest the recipes flow. 'other' → reject (iOS shows
+  // "neither fridge nor meal" alert). null = classifier failure → fall
+  // through to Sonnet so a flaky Haiku doesn't block users.
+  if (detected === "fridge" || detected === "other") {
     return Response.json(
-      { wrongSection: true, suggestedType: "fridge" as const },
+      { wrongSection: true, suggestedType: detected },
       {
         headers: {
           "X-RateLimit-Limit": String(rate.limit),

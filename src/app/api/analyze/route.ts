@@ -129,9 +129,13 @@ export async function POST(req: Request) {
   // classifyImage returns "other" on any failure, so the happy path is
   // never blocked by a flaky classifier.
   const detected = await classifyImage(parsed.data.imageBase64);
-  if (detected === "meal") {
+  // 'meal' → suggest the meal flow. 'other' → reject outright (iOS shows
+  // "neither fridge nor meal" alert and asks for a new photo). null means
+  // the classifier itself failed — fall through to Sonnet so a flaky
+  // Haiku call doesn't block legitimate users.
+  if (detected === "meal" || detected === "other") {
     return Response.json(
-      { wrongSection: true, suggestedType: "meal" as const },
+      { wrongSection: true, suggestedType: detected },
       {
         headers: {
           "X-RateLimit-Limit": String(rate.limit),
@@ -147,7 +151,7 @@ export async function POST(req: Request) {
       preferences,
     });
     return Response.json(
-      { ...result, detectedType: detected },
+      { ...result, detectedType: detected ?? "fridge" },
       {
         headers: {
           "X-RateLimit-Limit": String(rate.limit),

@@ -6,12 +6,13 @@
 // one-word output prompt. Classifies into:
 //   - "fridge" — Kühlschrank/Vorratsschrank/Zutaten on a counter
 //   - "meal"   — fertig zubereitete Mahlzeit auf einem Teller
-//   - "other"  — anything else (catch-all, lets the request through)
+//   - "other"  — clearly neither (random object, person, scenery)
+//   - null     — classifier failure (network down, missing key, etc.)
 //
-// Fallback policy: if anything goes wrong (network failure, unparseable
-// response, missing API key, etc.) we return "other" so the caller can
-// fall through to its existing Sonnet behavior. Never block a legitimate
-// user on a flaky cheap classifier.
+// Routes use the null vs "other" distinction: null means "we don't know,
+// let it through to Sonnet", "other" means "Haiku is confident it's not
+// what the user picked, reject early". Never block a legitimate user on
+// a flaky classifier.
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const HAIKU_MODEL = "claude-haiku-4-5-20251001";
@@ -73,11 +74,11 @@ function parseLabel(text: string): ImageKind {
   return "other";
 }
 
-export async function classifyImage(base64: string): Promise<ImageKind> {
+export async function classifyImage(base64: string): Promise<ImageKind | null> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("[classify] ANTHROPIC_API_KEY is not set; falling through");
-    return "other";
+    return null;
   }
 
   let prepared: { data: string; mediaType: ReturnType<typeof detectMediaType> };
@@ -85,7 +86,7 @@ export async function classifyImage(base64: string): Promise<ImageKind> {
     prepared = prepareImage(base64);
   } catch (err) {
     console.error("[classify] failed to prepare image:", err);
-    return "other";
+    return null;
   }
 
   const body = {
@@ -124,7 +125,7 @@ export async function classifyImage(base64: string): Promise<ImageKind> {
   } catch (err) {
     // Network error — Haiku is down or unreachable. Don't block the user.
     console.error("[classify] network error:", err);
-    return "other";
+    return null;
   }
 
   if (!res.ok) {
@@ -132,7 +133,7 @@ export async function classifyImage(base64: string): Promise<ImageKind> {
     console.error(
       `[classify] Anthropic API error ${res.status}: ${text.slice(0, 300)}`,
     );
-    return "other";
+    return null;
   }
 
   let respJson: { content?: Array<{ type: string; text?: string }> };
@@ -140,7 +141,7 @@ export async function classifyImage(base64: string): Promise<ImageKind> {
     respJson = (await res.json()) as typeof respJson;
   } catch (err) {
     console.error("[classify] failed to parse Anthropic response:", err);
-    return "other";
+    return null;
   }
 
   const textBlock = respJson.content?.find(
@@ -148,7 +149,7 @@ export async function classifyImage(base64: string): Promise<ImageKind> {
   );
   if (!textBlock?.text) {
     console.error("[classify] no text content in Anthropic response");
-    return "other";
+    return null;
   }
 
   return parseLabel(textBlock.text);
