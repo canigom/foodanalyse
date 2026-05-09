@@ -23,16 +23,45 @@ export const runtime = "nodejs";
 // limit, but setting it explicitly is harmless and self-documenting.
 export const maxDuration = 60;
 
+const StringArray = z.array(z.string().max(LIMITS.preferenceItem)).max(20);
+
 const PrefsSchema = z.object({
-  dietary: z.array(z.string().max(LIMITS.preferenceItem)).max(20).optional(),
-  cuisines: z.array(z.string().max(LIMITS.preferenceItem)).max(20).optional(),
-  dislikes: z.array(z.string().max(LIMITS.preferenceItem)).max(20).optional(),
+  dietary: StringArray.optional(),
+  cuisines: StringArray.optional(),
+  dislikes: StringArray.optional(),
+  occasion: StringArray.optional(),
+  equipment: StringArray.optional(),
+  time: StringArray.optional(),
+  difficulty: StringArray.optional(),
+  allergies: StringArray.optional(),
 });
 
 const AnalyzeBodySchema = z.object({
   imageBase64: z.string().min(100).max(LIMITS.imageBase64),
   preferences: PrefsSchema.optional(),
 });
+
+type Prefs = {
+  dietary: string[];
+  cuisines: string[];
+  dislikes: string[];
+  occasion: string[];
+  equipment: string[];
+  time: string[];
+  difficulty: string[];
+  allergies: string[];
+};
+
+const EMPTY_PREFS: Prefs = {
+  dietary: [],
+  cuisines: [],
+  dislikes: [],
+  occasion: [],
+  equipment: [],
+  time: [],
+  difficulty: [],
+  allergies: [],
+};
 
 export async function POST(req: Request) {
   let body: unknown;
@@ -78,18 +107,33 @@ export async function POST(req: Request) {
   // Resolve preferences. Logged-in users: always use server-side row
   // (ignore body), so a stale iOS client can't override prefs the user
   // updated elsewhere. Anonymous: use body or default to empty.
-  let preferences = { dietary: [] as string[], cuisines: [] as string[], dislikes: [] as string[] };
+  let preferences: Prefs = EMPTY_PREFS;
   if (auth) {
     const row = await db.preference.findUnique({
       where: { userId: auth.userId },
-      select: { dietary: true, cuisines: true, dislikes: true },
+      select: {
+        dietary: true,
+        cuisines: true,
+        dislikes: true,
+        occasion: true,
+        equipment: true,
+        time: true,
+        difficulty: true,
+        allergies: true,
+      },
     });
-    if (row) preferences = row;
+    if (row) preferences = { ...EMPTY_PREFS, ...row };
   } else if (parsed.data.preferences) {
+    const p = parsed.data.preferences;
     preferences = {
-      dietary: parsed.data.preferences.dietary ?? [],
-      cuisines: parsed.data.preferences.cuisines ?? [],
-      dislikes: parsed.data.preferences.dislikes ?? [],
+      dietary: p.dietary ?? [],
+      cuisines: p.cuisines ?? [],
+      dislikes: p.dislikes ?? [],
+      occasion: p.occasion ?? [],
+      equipment: p.equipment ?? [],
+      time: p.time ?? [],
+      difficulty: p.difficulty ?? [],
+      allergies: p.allergies ?? [],
     };
   }
 

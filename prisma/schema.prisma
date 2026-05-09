@@ -41,6 +41,15 @@ model Preference {
   cuisines  String[]
   // free-text ingredients to avoid
   dislikes  String[]
+  // Newer categorized preference fields. All optional — older clients only
+  // sending dietary/cuisines/dislikes still work, and new clients can fill
+  // these in for richer prompt construction. Each field is a list of stable
+  // ids defined client-side in src/lib/preference-options.ts.
+  occasion   String[] @default([])
+  equipment  String[] @default([])
+  time       String[] @default([])
+  difficulty String[] @default([])
+  allergies  String[] @default([])
   updatedAt DateTime @updatedAt
 }
 

@@ -15,23 +15,53 @@ export type AnalyzePreferences = {
   dietary: string[];
   cuisines: string[];
   dislikes: string[];
+  // All optional — older callers / older DB rows may not have these.
+  occasion?: string[];
+  equipment?: string[];
+  time?: string[];
+  difficulty?: string[];
+  allergies?: string[];
 };
 
-function joinOr(items: string[], fallback: string): string {
-  const cleaned = items.map((x) => x.trim()).filter(Boolean);
-  if (cleaned.length === 0) return fallback;
-  return cleaned.join(", ");
+function clean(items: string[] | undefined): string[] {
+  if (!Array.isArray(items)) return [];
+  return items.map((x) => String(x).trim()).filter(Boolean);
+}
+
+// Render a single "Bevorzuge X." style line, but only if the field is set.
+// Returning null lets the caller skip empty categories without bloating
+// the prompt with "keine / alle / nichts" placeholders for every category.
+function line(label: string, items: string[] | undefined): string | null {
+  const cleaned = clean(items);
+  if (cleaned.length === 0) return null;
+  return `- ${label}: ${cleaned.join(", ")}`;
 }
 
 export function buildUserPrompt(prefs: AnalyzePreferences): string {
+  const prefLines: string[] = [];
+
+  // Dietary always emitted (with "keine" fallback) — it's the most important
+  // constraint and the model should explicitly acknowledge it.
+  prefLines.push(`- Ernährung: ${clean(prefs.dietary).join(", ") || "keine"}`);
+
+  const optional = [
+    line("Bevorzugte Küchen", prefs.cuisines),
+    line("Anlass / Mahlzeit", prefs.occasion),
+    line("Verfügbares Equipment", prefs.equipment),
+    line("Maximale Zubereitungszeit", prefs.time),
+    line("Schwierigkeit", prefs.difficulty),
+    line("Allergien (unbedingt vermeiden)", prefs.allergies),
+    line("Sonstige Vermeidungen", prefs.dislikes),
+  ].filter((x): x is string => x !== null);
+
+  prefLines.push(...optional);
+
   return [
     "Schau dir das Foto vom Kühlschrank an. Liste die sichtbaren Zutaten auf. " +
       "Schlage dann genau 3 Rezepte vor, die diese Zutaten nutzen.",
     "",
     "Berücksichtige diese Präferenzen:",
-    `- Ernährung: ${joinOr(prefs.dietary, "keine")}`,
-    `- Bevorzugte Küchen: ${joinOr(prefs.cuisines, "alle")}`,
-    `- Vermeide: ${joinOr(prefs.dislikes, "nichts")}`,
+    ...prefLines,
     "",
     "Antwortformat (gültiges JSON):",
     "{",
