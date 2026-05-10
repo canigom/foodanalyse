@@ -1,7 +1,13 @@
 // /api/inventory/:id — PATCH (partial update) + DELETE.
 //
-// Tenant check: every query is scoped to (id, userId). On a miss we return
-// 404 (not 403) so a guessed id stays indistinguishable from a wrong one.
+// Tenant check (Phase 3): the caller may be the original author OR any
+// other member of the item's household — shared households need shared
+// edit access. We accept the row when:
+//   - userId === auth.userId (author), OR
+//   - the item's householdId is one the auth user is a member of, OR
+//   - legacy: householdId is null AND userId === auth.userId.
+// On a miss we return 404 (not 403) so a guessed id stays
+// indistinguishable from a wrong one.
 //
 // PATCH semantics: every field is optional; only the keys present in the
 // body are touched. expiresAt accepts `null` to clear an existing date so
@@ -17,6 +23,7 @@ import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/auth-bearer";
 import { LIMITS } from "@/lib/limits";
+import { requireMembership } from "@/lib/household";
 
 export const runtime = "nodejs";
 
@@ -68,15 +75,22 @@ export async function PATCH(
     );
   }
 
-  // Tenant check via findFirst — we need to confirm ownership before
-  // running update, because Prisma's update-by-id doesn't accept a
-  // userId in the where clause. Cheaper than updateMany + re-read for
-  // the one-row case.
-  const existing = await db.inventoryItem.findFirst({
-    where: { id, userId: auth.userId },
-    select: { id: true },
+  // Tenant check — confirm the caller is allowed to touch this row before
+  // updating. Allowed if they authored it OR they're a member of the
+  // item's household (shared edit access). Legacy rows with no
+  // householdId fall through the userId check.
+  const existing = await db.inventoryItem.findUnique({
+    where: { id },
+    select: { id: true, userId: true, householdId: true },
   });
   if (!existing) {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
+  const allowed =
+    existing.userId === auth.userId ||
+    (existing.householdId !== null &&
+      (await requireMembership(existing.householdId, auth.userId)) !== null);
+  if (!allowed) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -114,12 +128,24 @@ export async function DELETE(
 
   const { id } = await ctx.params;
 
-  const result = await db.inventoryItem.deleteMany({
-    where: { id, userId: auth.userId },
+  // Same tenant rule as PATCH: author OR co-member of the item's
+  // household may delete. Legacy null-householdId rows fall back to the
+  // author-only check.
+  const existing = await db.inventoryItem.findUnique({
+    where: { id },
+    select: { id: true, userId: true, householdId: true },
   });
-
-  if (result.count === 0) {
+  if (!existing) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
+  const allowed =
+    existing.userId === auth.userId ||
+    (existing.householdId !== null &&
+      (await requireMembership(existing.householdId, auth.userId)) !== null);
+  if (!allowed) {
+    return Response.json({ error: "Not found" }, { status: 404 });
+  }
+
+  await db.inventoryItem.delete({ where: { id } });
   return Response.json({ ok: true });
 }

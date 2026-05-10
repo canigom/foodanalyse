@@ -30,6 +30,25 @@ model User {
   savedRecipes SavedRecipe[]
   meals        Meal[]
   inventoryItems InventoryItem[]
+  // Phase 2 — Einkaufslisten (shopping lists). A user can own lists, be a
+  // shared-in member of other users' lists, and have authored individual
+  // items on lists they belong to (so we can attribute "added by" rows).
+  ownedShoppingLists ShoppingList[]       @relation("OwnedShoppingLists")
+  listMemberships    ShoppingListMember[]
+  addedListItems     ShoppingListItem[]
+  // Phase 3 — Multi-Household. Every user owns at least one personal
+  // household (lazily created on first /api/households read). Premium
+  // users can own additional households + invite others. Inventory items
+  // (and eventually shopping lists / meal plans) get household-scoped so
+  // families can share one fridge view.
+  ownedHouseholds      Household[]       @relation("OwnedHouseholds")
+  householdMemberships HouseholdMember[]
+  // Currently-selected household. Defaults to the user's personal one,
+  // updated when the user picks another household via the iOS picker
+  // (PUT /api/households/active). Nullable so the lazy-create path on
+  // first /api/households call can populate it without a separate
+  // migration step.
+  activeHouseholdId    String?
   accounts     Account[]
   sessions     Session[]
 }
@@ -157,6 +176,12 @@ model InventoryItem {
   id              String    @id @default(cuid())
   userId          String
   user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Phase 3: items are now household-scoped. Nullable for backward compat
+  // with rows created before Phase 3 — read-time fallback in the inventory
+  // route treats null as "belongs to the user's personal household". New
+  // POSTs always set this to the user's activeHouseholdId.
+  householdId     String?
+  household       Household? @relation(fields: [householdId], references: [id], onDelete: SetNull)
   name            String
   // Numeric quantity ("2", "500"). Optional because not every item has a
   // meaningful number ("Olivenöl" without a measure is fine).
@@ -177,6 +202,130 @@ model InventoryItem {
   notificationIds String[]  @default([])
 
   @@index([userId, expiresAt])
+  @@index([householdId, expiresAt])
+}
+
+// Phase 3 — Haushalte (households).
+//
+// A household groups users that share a fridge / pantry. Every user has at
+// least one personal household (lazily created the first time they hit
+// /api/households if they have no membership yet). Premium users can own
+// additional households AND issue invite codes to bring other accounts in
+// as members. Free users always belong to exactly their one personal
+// household — POST /api/households + POST /api/households/:id/invite both
+// 402 for non-premium.
+//
+// inviteCode is null when no active invite exists. When the owner mints
+// one (POST /api/households/:id/invite, premium-gated) we generate a
+// fresh 8-char base32 string and stamp inviteExpiresAt 7 days out. It's
+// uniquely indexed so the join lookup is a single findUnique.
+//
+// onDelete: Cascade — deleting a user wipes their owned households and
+// all member rows pointing at the user. The InventoryItem.household FK
+// is SetNull so deleting a household demotes its items back to the
+// "personal" bucket via the read-time fallback path rather than nuking
+// the user's history.
+model Household {
+  id              String   @id @default(cuid())
+  name            String
+  ownerId         String
+  owner           User     @relation("OwnedHouseholds", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+  // 8-char base32 invite code; uniquely indexed so /api/households/join
+  // can findUnique on it. Premium-only — minted via POST /:id/invite,
+  // revoked via DELETE /:id/invite.
+  inviteCode      String?  @unique
+  inviteExpiresAt DateTime?
+  members         HouseholdMember[]
+  inventoryItems  InventoryItem[]
+
+  @@index([ownerId])
+}
+
+model HouseholdMember {
+  id          String   @id @default(cuid())
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // 'owner' | 'member'. Owners can rename + delete the household and
+  // mint/revoke invites. Members can leave but otherwise read-only on
+  // the household itself; both can read+write the household's inventory.
+  role        String   @default("member")
+  joinedAt    DateTime @default(now())
+
+  @@unique([householdId, userId])
+}
+
+// Phase 2 — Einkaufslisten (shopping lists).
+//
+// A list belongs to one owner. Items live on lists, optionally attributed
+// to the user that added them. Members are an explicit M:N join — a list
+// has zero or more shared-in users (premium feature). The owner is *not*
+// stored as a member; ownership is the `ownerId` column instead so the
+// "list as I see it" query stays one OR-clause.
+//
+// shareToken is null until the owner generates one via POST /api/lists/:id/share
+// (premium-gated). It's a 16-char base32 string and unique across all lists,
+// so it can be exchanged for membership without leaking the underlying id.
+//
+// onDelete: Cascade everywhere — deleting a user nukes their owned lists,
+// deleting a list nukes its items + memberships. Member rows reference both
+// the list and the user with cascade so an account-delete (DSGVO Art. 17)
+// cleanly tears their slice out of every shared list they joined.
+model ShoppingList {
+  id          String   @id @default(cuid())
+  ownerId     String
+  owner       User     @relation("OwnedShoppingLists", fields: [ownerId], references: [id], onDelete: Cascade)
+  name        String   // user-given name, e.g. "Wocheneinkauf", "Geburtstagsparty"
+  // Null = not shared. Premium-only feature: generated by POST /share, revoked
+  // by DELETE /share. Unique so `findUnique({ where: { shareToken } })` is the
+  // O(1) join lookup.
+  shareToken  String?  @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  items       ShoppingListItem[]
+  members     ShoppingListMember[]
+
+  @@index([ownerId])
+}
+
+model ShoppingListItem {
+  id            String   @id @default(cuid())
+  listId        String
+  list          ShoppingList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  name          String
+  // Optional numeric quantity ("2", "500"). Loose because users add ambiguous
+  // entries ("Olivenöl") all the time.
+  quantity      Float?
+  // Stable id matching the InventoryItem unit set: 'stk' | 'g' | 'kg' | 'ml' | 'l'.
+  unit          String?
+  checked       Boolean  @default(false)
+  // Server-side audit timestamp for "X erledigt von Y" analytics later.
+  // Set by the PATCH endpoint when checked transitions false→true.
+  checkedAt     DateTime?
+  // Manual ordering — clients can drag-and-drop. Default 0 means "append";
+  // the iOS client recomputes positions on reorder.
+  position      Int      @default(0)
+  // Attribution — who added the row. Null when the adder later deletes
+  // their account (FK is SetNull, not Cascade, so the item itself
+  // survives). Owner OR member can add.
+  addedById     String?
+  addedBy       User?    @relation(fields: [addedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+
+  @@index([listId, position])
+}
+
+model ShoppingListMember {
+  id        String   @id @default(cuid())
+  listId    String
+  list      ShoppingList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt  DateTime @default(now())
+
+  @@unique([listId, userId])
 }
 
 // Standard NextAuth tables — used only by the Google OAuth flow.

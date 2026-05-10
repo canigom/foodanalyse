@@ -1,24 +1,30 @@
-// /api/inventory — GET (list every item the user owns) + POST (add one).
+// /api/inventory — GET (list every item in the user's active household)
+// + POST (add one to the active household).
 //
-// Auth required: items are user-scoped via InventoryItem.userId. There is
-// no anonymous flow; an unauthenticated caller simply has nowhere to attach
-// the row, so we 401 rather than allowing silent loss.
+// Auth required: items are now Household-scoped (Phase 3) but legacy rows
+// from before the migration still carry only userId. We treat any row
+// where userId === auth.userId AND (householdId === activeHouseholdId OR
+// householdId === null) as belonging to the active view. This is the
+// "read-time fallback" migration strategy — no batch backfill, the rows
+// simply land in the user's current household next time they're touched.
 //
-// List ordering: expiresAt asc with nulls LAST. Postgres orders nulls first
-// by default; we flip that with a raw NULLS LAST hint via Prisma's
-// `{ sort: 'asc', nulls: 'last' }` option. The iOS list re-groups items by
-// urgency client-side, but the server-side ordering keeps the "most urgent
-// first" ordering inside each group consistent.
+// On POST we always stamp the new row's householdId with the user's
+// active household so future reads stay scoped without depending on the
+// fallback.
+//
+// List ordering: expiresAt asc with nulls LAST. Postgres orders nulls
+// first by default; we flip that with `{ sort: 'asc', nulls: 'last' }`.
 //
 // Limits: name is reasonable as a recipe-name (200 chars). notes reuses
-// the recipe-description cap (2000) — generous since users sometimes paste
-// in storage instructions. quantity is bounded to a sane max so a fat-
-// finger ("99999") doesn't break the UI layout.
+// the recipe-description cap (2000) — generous since users sometimes
+// paste in storage instructions. quantity is bounded to a sane max so a
+// fat-finger ("99999") doesn't break the UI layout.
 
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { requireUser } from "@/lib/auth-bearer";
 import { LIMITS } from "@/lib/limits";
+import { ensureActiveHousehold } from "@/lib/household";
 
 export const runtime = "nodejs";
 
@@ -47,10 +53,23 @@ export async function GET(req: Request) {
   const auth = await requireUser(req);
   if (auth instanceof Response) return auth;
 
+  // Lazy-create the user's personal household + pick activeHouseholdId
+  // before scoping the read. Brand-new accounts hit this on their first
+  // inventory load (or first /api/households call, whichever comes first).
+  const activeHouseholdId = await ensureActiveHousehold(auth.userId);
+
+  // Membership-scoped read: the caller could be looking at someone else's
+  // household (they joined via invite). For shared households we want to
+  // see the OTHER members' items too — match on householdId, not userId.
+  // Legacy null-householdId rows belonging to the auth user fall back
+  // into the view as well so old data isn't lost.
   const items = await db.inventoryItem.findMany({
-    where: { userId: auth.userId },
-    // Most-urgent first; items without a date sink to the bottom so the
-    // dated rows surface before the user has to scroll.
+    where: {
+      OR: [
+        { householdId: activeHouseholdId },
+        { householdId: null, userId: auth.userId },
+      ],
+    },
     orderBy: [
       { expiresAt: { sort: "asc", nulls: "last" } },
       { addedAt: "desc" },
@@ -63,6 +82,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requireUser(req);
   if (auth instanceof Response) return auth;
+
+  const activeHouseholdId = await ensureActiveHousehold(auth.userId);
 
   let body: unknown;
   try {
@@ -82,6 +103,7 @@ export async function POST(req: Request) {
   const item = await db.inventoryItem.create({
     data: {
       userId: auth.userId,
+      householdId: activeHouseholdId,
       name: parsed.data.name,
       quantity: parsed.data.quantity ?? null,
       unit: parsed.data.unit ?? null,
